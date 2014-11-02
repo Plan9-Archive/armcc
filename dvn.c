@@ -77,7 +77,7 @@ dvnlook(int op, ValNum *y, ValNum *z)
 	
 	h = dvnhash(op, y, z);
 	for(vs = vscope; vs != nil; vs = vs->up)
-		for(v = vscope->v[h % vscope->nv]; v != nil; v = v->next)
+		for(v = vs->v[h % vs->nv]; v != nil; v = v->next)
 			if(v->src == OP && v->op == op && v->y == y && v->z == z)
 				return v;
 	return nil;
@@ -96,7 +96,7 @@ dvnput(int op, ValNum *y, ValNum *z, Targ *t)
 	v->y = y;
 	v->z = z;
 	v->t = t;
-	if(op == OPLD || op == OPST)
+	if(OPGROUP(op) == OPLD)
 		return v;
 	h = dvnhash(op, y, z);
 	p = &vscope->v[h % vscope->nv];
@@ -134,14 +134,15 @@ addtarg(Targ *t)
 	case TARGSYM:
 	case TARGRETV:
 	case TARGFP:
+	case TARGARG:
+	case TARGCONST:
+	case TARGADDR:
 		return;
 	case TARGIND:
 		addtarg(t->link);
 		return;
 	case TARGSSA:
 	case TARGTEMP:
-	case TARGCONST:
-	case TARGADDR:
 		break;
 	default:
 		print("addtarg: unhandled type %J (%d)\n", t, t->t);
@@ -196,14 +197,14 @@ getval(Targ *t)
 
 	if(t == nil)
 		return nil;
-	if(t->num < 0)
-		return nil;
-	if(targval[t->num] != nil)
-		return targval[t->num];
 	if(t->t == TARGCONST)
 		return getconst(t->lval, t, nil);
 	if(t->t == TARGADDR)
 		return getconst(t->n, t, t->sym);
+	if(t->num < 0)
+		return nil;
+	if(targval[t->num] != nil)
+		return targval[t->num];
 	v = emalloc(sizeof(ValNum));
 	v->t = t;
 	targval[t->num] = v;
@@ -239,6 +240,8 @@ dvntrav(IRBlock *b)
 				continue;
 			if(i->op == OPMOV){
 				targval[i->r->num] = y;
+				if(y->t->t == TARGCONST || y->t->t == TARGTEMP && i->r->t == TARGSSA)
+					y->t = i->r;
 				continue;
 			}
 			if(y->src == CONST && (z == nil || z->src == CONST) && longop(i, i->op, y->lval, z != nil ? z->lval : 0, &r)){
@@ -314,6 +317,8 @@ dvntrav(IRBlock *b)
 				i->op = OPMOV;
 				i->b = nil;
 				i->a = w->t;
+				if(w->t->t == TARGCONST)
+					w->t = i->r;
 			}else
 				w = dvnput(i->op, y, z, i->r);
 			targval[i->r->num] = w;
@@ -429,9 +434,12 @@ dead(void)
 			if(OPTYPE(i->op) == OPBRANCH)
 				goto useful;
 			switch(i->op){
-			case OPLD:
-			case OPST:
+			case OPLD: case OPLDB: case OPLDSB: case OPLDH: case OPLDSH: case OPLDD:
+				if(i->a->t == TARGFP)
+					break;
+			case OPST: case OPSTB: case OPSTH: case OPSTD:
 			case OPCMP:
+			case OPCALL:
 			useful:
 				markir(&p, i);
 				break;
@@ -439,6 +447,7 @@ dead(void)
 				switch(i->r->t){
 				case TARGRETV:
 				case TARGSYM:
+				case TARGARG:
 					goto useful;
 				}
 			default:

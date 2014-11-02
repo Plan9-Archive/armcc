@@ -3,6 +3,7 @@ typedef struct Symbol Symbol;
 typedef struct SymTab SymTab;
 typedef struct Type Type;
 typedef struct Line Line;
+typedef struct Loop Loop;
 typedef struct IR IR;
 typedef struct IRBlock IRBlock;
 typedef struct Targ Targ;
@@ -52,6 +53,8 @@ enum {
 	
 	TBASIC = TDOUBLE,
 };
+#define regtype (&types[TUINT])
+extern Type types[];
 
 enum {
 	BINT = 1<<0,
@@ -94,10 +97,7 @@ struct ASTNode {
 			Member *memb;
 			int nmemb;
 		};
-		struct {
-			ASTNode *first;
-			ASTNode **last;
-		};
+		ASTNode *first;
 		struct {
 			ASTNode *cond;
 			ASTNode *block;
@@ -118,8 +118,14 @@ struct ASTNode {
 			char *name;
 			Member *m;
 		} mb;
+		struct {
+			ASTNode *n;
+			ASTNode **args;
+			int argn;
+		} func;
 	};
 	ASTNode *next;
+	ASTNode **last;
 	Line;
 };
 
@@ -148,6 +154,7 @@ enum {
 	ASTLABEL,
 	ASTGOTO,
 	ASTMEMB,
+	ASTCALL,
 };
 
 enum {
@@ -155,8 +162,7 @@ enum {
 	OPUPLUS,
 	OPNEG,
 	OPTST,
-	OPLD,
-	OPST,
+	OPCALL,
 
 	OPADD = 0x10,
 	OPSUB,
@@ -164,6 +170,7 @@ enum {
 	OPDIV,
 	OPMOD,
 	OPCMP,
+	OPRSB,
 	
 	OPAND = 0x20,
 	OPOR,
@@ -171,6 +178,7 @@ enum {
 	OPLSH,
 	OPRSH,
 	OPASR,
+	OPROR,
 	OPCOM,
 	
 	OPSXTB,
@@ -180,7 +188,23 @@ enum {
 	OPZXTH,
 	OPZXTW,
 	
-	OPFLOAT = 0x1f,
+	OPLD = 0x30,
+	OPLDB,
+	OPLDSB,
+	OPLDH,
+	OPLDSH,
+	OPLDD,
+	OPST,
+	OPSTB,
+	OPSTH,
+	OPSTD,
+	
+	OPFNEG = OPNEG + 0x40,
+	OPFADD = 0x50,
+	OPFSUB,
+	OPFMUL,
+	OPFDIV,
+	OPFCMP = 0x55,
 
 	OPEQ = 0x100,
 	OPNE,
@@ -201,6 +225,7 @@ enum {
 };
 
 #define OPTYPE(o) ((o) & 0xf00)
+#define OPGROUP(o) ((o) & 0xff0)
 
 enum {
 	OPNORM = 0,
@@ -211,7 +236,7 @@ enum {
 	PREINC,
 	POSTINC,
 	PREDEC,
-	POSTDEC
+	POSTDEC,
 };
 
 struct Symbol {
@@ -245,9 +270,16 @@ struct Targ {
 		int lval;
 		int tn;
 		int off;
+		struct {
+			Targ *a;
+			Targ *b;
+			int op;
+		};
 	};
 	int num;
 	IR *def;
+	Type *type;
+	int Rn;
 };
 
 enum {
@@ -260,6 +292,12 @@ enum {
 	TARGFP,
 	TARGIND,
 	TARGADDR,
+	TARGARG,
+	TARGSH,
+};
+
+enum {
+	MAXUSE = 5,
 };
 
 struct IR {
@@ -306,11 +344,18 @@ struct IRBlock {
 	IRBlock *link;
 };
 
+struct Loop {
+	BitSet *bl;
+	IRBlock *head;
+	Loop *next;
+};
+
 struct Function {
 	IRBlock bllist;
 	int tempcnt;
 	Type *type;
 	Symbol **arg;
+	Loop *loops;
 };
 
 struct BitSet {
@@ -327,3 +372,7 @@ struct BitSet {
 
 extern Line curline;
 extern Function *curfunc;
+extern IRBlock **blocks;
+extern int nblocks;
+extern Targ **targs;
+extern int ntargs;

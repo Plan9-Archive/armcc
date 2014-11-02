@@ -28,7 +28,7 @@ int lastclass;
 %token <sym> LSYMBOL LTYPE
 %token <lval> LCONST
 
-%type <node> expr stat declar dirdeclar block statlist zexpr structdecl xdeclar xdirdeclar
+%type <node> expr stat declar dirdeclar block statlist zexpr structdecl xdeclar xdirdeclar exprlist cexpr
 %type <ti> bctype ctype
 %type <lval> tname cname tcname cnames btype justitype
 %type <typ> dname justtype casttype
@@ -53,7 +53,7 @@ int lastclass;
 %left '*' '/' '%'
 %left LDEREF
 %left LINC LDEC '!' '~'
-%left '.' LARROW '['
+%left '.' LARROW '[' '('
 
 %%
 
@@ -76,7 +76,7 @@ dirdeclar:
 	| LTYPE { $$ = node(ASTSYM, $1); }
 	| '(' declar ')' { $$ = $2; }
 	| dirdeclar '[' ']' { $$ = node(ASTARRAY, $1, nil); }
-	| dirdeclar '[' expr ']' { $$ = node(ASTARRAY, $1, $3); }
+	| dirdeclar '[' cexpr ']' { $$ = node(ASTARRAY, $1, $3); }
 	| dirdeclar '(' parlist ')' { $$ = node(ASTFUNCTYPE, $1, $3); }
 
 xdeclar:
@@ -86,7 +86,7 @@ xdirdeclar:
 	LSYMBOL { $$ = node(ASTSYM, $1); }
 	| '(' xdeclar ')' { $$ = $2; }
 	| xdirdeclar '[' ']' { $$ = node(ASTARRAY, $1, nil); }
-	| xdirdeclar '[' expr ']' { $$ = node(ASTARRAY, $1, $3); }
+	| xdirdeclar '[' cexpr ']' { $$ = node(ASTARRAY, $1, $3); }
 	| xdirdeclar '(' parlist ')' { $$ = node(ASTFUNCTYPE, $1, $3); }
 
 
@@ -171,27 +171,26 @@ statlist: { $$ = node(ASTBLOCK); }
 
 stat:
 	';' { $$ = nil; }
-	| expr ';'
-	| LIF '(' expr ')' stat { $$ = node(ASTIF, $expr, $stat, nil); }
-	| LIF '(' expr ')' stat LELSE stat { $$ = node(ASTIF, $3, $5, $7); }
-	| LWHILE '(' expr ')' stat { $$ = node(ASTWHILE, $expr, $stat); }
-	| LDO stat LWHILE '(' expr ')' ';' { $$ = node(ASTDOWHILE, $expr, $stat); }
+	| cexpr ';'
+	| LIF '(' cexpr ')' stat { $$ = node(ASTIF, $cexpr, $stat, nil); }
+	| LIF '(' cexpr ')' stat LELSE stat { $$ = node(ASTIF, $3, $5, $7); }
+	| LWHILE '(' cexpr ')' stat { $$ = node(ASTWHILE, $cexpr, $stat); }
+	| LDO stat LWHILE '(' cexpr ')' ';' { $$ = node(ASTDOWHILE, $cexpr, $stat); }
 	| LFOR '(' zexpr ';' zexpr ';' zexpr ')' stat { $$ = node(ASTFOR, $zexpr#1, $zexpr#2, $zexpr#3, $stat); }
 	| block
 	| LBREAK ';' { $$ = node(ASTBREAK); }
 	| LCONTINUE ';' { $$ = node(ASTCONTINUE); }
 	| LRETURN ';' { $$ = node(ASTRETURN, nil); }
-	| LRETURN expr ';' { $$ = node(ASTRETURN, $expr); }
+	| LRETURN cexpr ';' { $$ = node(ASTRETURN, $cexpr); }
 	| LSYMBOL ':' stat { $$ = node(ASTLABEL, $1); $$->next = $3; }
 	| LGOTO LSYMBOL ';' { $$ = node(ASTGOTO, $2); }
 	
-zexpr: expr | { $$ = nil; }
+zexpr: cexpr | { $$ = nil; }
 
 expr:
-	'(' expr ')' { $$ = $2; }
+	'(' cexpr ')' { $$ = $2; }
 	| LCONST { $$ = node(ASTCLONG, $1); }
-	| LSYMBOL { checksym($1); $$ = node(ASTSYM, $1); }
-	| expr ',' expr { $$ = node(ASTCOMMA, $1, $3); }
+	| LSYMBOL { $$ = node(ASTSYM, $1); }
 	| expr '=' expr { $$ = node(ASTASS, OPMOV, $1, $3); }
 	| expr LPLEQ expr { $$ = node(ASTASS, OPADD, $1, $3); }
 	| expr LMIEQ expr { $$ = node(ASTASS, OPSUB, $1, $3); }
@@ -236,3 +235,18 @@ expr:
 	| '(' casttype ')' expr %prec LINC { $$ = node(ASTCAST, $4, $2); }
 	| expr '.' tag { $$ = node(ASTMEMB, $1, $3->name); }
 	| expr LARROW tag { $$ = node(ASTMEMB, node(ASTDEREF, $1), $3->name); }
+	| expr '(' ')' { $$ = node(ASTCALL, $1, nil); }
+	| expr '(' exprlist ')' { $$ = node(ASTCALL, $1, $3); }
+
+cexpr: expr | cexpr ',' cexpr { $$ = node(ASTCOMMA, $1, $3); }
+
+exprlist:
+	expr { $1->last = &$1->next; }
+	| exprlist ',' expr
+		{
+			if($3 != nil){
+				*$1->last = $3;
+				$1->last = &$3->next;
+			}
+		}
+

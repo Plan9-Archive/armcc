@@ -10,6 +10,8 @@ OFILES=\
 	set.$O\
 	ssa.$O\
 	dvn.$O\
+	cgen.$O\
+	ra.$O\
 
 YFILES=grammar.y
 

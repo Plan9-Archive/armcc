@@ -35,7 +35,7 @@ addir(IRBlock *b, IR *i)
 	i->next->prev = i;
 }
 
-static IR *
+IR *
 irop(Line *l, int op)
 {
 	IR *i;
@@ -62,28 +62,40 @@ targ(int n, ...)
 	va_start(va, n);
 	t = emalloc(sizeof(*t));
 	t->num = -1;
+	t->Rn = -1;
 	t->t = n;
 	switch(n){
 	case TARGRETV:
+		t->type = va_arg(va, Type *);
 		break;
 	case TARGFP:
 	case TARGCONST:
+	case TARGARG:
 		t->off = va_arg(va, int);
+		t->type = regtype;
 		break;
 	case TARGSYM:
 		t->sym = va_arg(va, Symbol *);
+		t->type = t->sym->t;
 		break;
 	case TARGSSA:
 		t->sym = va_arg(va, Symbol *);
+		t->type = t->sym->t;
 		t->n = va_arg(va, int);
 		t->up = va_arg(va, Targ *);
 		break;
 	case TARGIND:
 		t->link = va_arg(va, Targ *);
+		t->type = va_arg(va, Type *);
 		break;
 	case TARGADDR:
 		t->sym = va_arg(va, Symbol *);
 		t->n = va_arg(va, int);
+		break;
+	case TARGSH:
+		t->op = va_arg(va, int);
+		t->a = va_arg(va, Targ *);
+		t->b = va_arg(va, Targ *);
 		break;
 	default:
 		sysfatal("targ: unhandled %d", n);
@@ -93,7 +105,7 @@ targ(int n, ...)
 }
 
 static Targ *
-newtemp(void)
+newtemp(Type *type)
 {
 	Targ *t;
 	
@@ -101,6 +113,8 @@ newtemp(void)
 	t->t = TARGTEMP;
 	t->tn = curfunc->tempcnt++;
 	t->num = -1;
+	t->Rn = -1;
+	t->type = type;
 	return t;
 }
 
@@ -143,32 +157,37 @@ legalc(ulong c)
 static Targ *
 irread(Line *l, Targ *t, IRBlock *b, int arith)
 {
+	Type *ty;
 	Symbol *s;
 	IR *i;
 
+	ty = regtype;
 	switch(t->t){
 	case TARGSYM:
 		s = t->sym;
-		if((s->class & BMEM) != 0)
+		if((s->class & BMEM) != 0){
+			ty = s->t;
 			goto move;
+		}
 		return t;
 	default:
 		print("irread: unhandled %d\n", t->t);
 		goto move;
 	case TARGCONST:
-		if(arith && legalc(t->lval))
-			return t;
+	/*	if(arith && legalc(t->lval))
+			return t;*/
 		goto move;
 	case TARGADDR:
 		goto move;
 	case TARGTEMP:
 		return t;
 	case TARGIND:
+		ty = t->type;
 		break;
 	}
 move:
 	i = irop(l, OPMOV);
-	i->r = newtemp();
+	i->r = newtemp(ty);
 	i->a = t;
 	addir(b, i);
 	return i->r;	
@@ -185,7 +204,7 @@ ircast(Line *l, IRBlock *b, Targ *t, int type)
 	else
 		o = OPZXTB + ((type - 1) >> 1);
 	i = irop(l, o);
-	i->r = newtemp();
+	i->r = newtemp(t->type);
 	i->a = t;
 	addir(b, i);
 	return i->r;
@@ -204,7 +223,7 @@ addrof(ASTNode *n, IRBlock *b, IRBlock **br)
 		return targ(TARGADDR, n->sym, 0);
 	case ASTMEMB:
 		i = irop(n, OPADD);
-		i->r = newtemp();
+		i->r = newtemp(regtype);
 		i->a = addrof(n->n, b, &b);
 		i->b = targ(TARGCONST, n->mb.m != nil ? n->mb.m->off : 0);
 		addir(b, i);
@@ -224,9 +243,10 @@ static Targ *
 irexpr(ASTNode *n, IRBlock *b, IRBlock **br)
 {
 	IRBlock *b0, *b1, *b2;
-	Targ *t, *l, *r;
+	Targ *t, *l, *r, **a;
 	IR *i;
-	int k;
+	int k, o;
+	Type *ty;
 
 	*br = b;
 	switch(n->t){
@@ -241,12 +261,13 @@ irexpr(ASTNode *n, IRBlock *b, IRBlock **br)
 	case ASTBIN:
 		switch(OPTYPE(n->op)){
 		case OPNORM:
-			i = irop(n, n->op);
+			k = n->type == &types[TFLOAT] || n->type == &types[TDOUBLE] ? OPFADD - OPADD : 0;
+			i = irop(n, n->op + k);
 			i->a = irexpr(n->n1, b, &b);
 			i->a = irread(n, i->a, b, 1);
 			i->b = irexpr(n->n2, b, &b);
 			i->b = irread(n, i->b, b, 1);
-			i->r = newtemp();
+			i->r = newtemp(n->type);
 			addir(b, i);
 			*br = b;
 			return i->r;
@@ -257,16 +278,16 @@ irexpr(ASTNode *n, IRBlock *b, IRBlock **br)
 			condbranch(n, b, b0, b1);
 			i = irop(n, OPMOV);
 			i->a = targ(TARGCONST, 1);
-			i->r = t = newtemp();
+			i->r = t = newtemp(regtype);
 			addir(b0, i);
 			b0->branch = b2;
 			i = irop(n, OPMOV);
 			i->a = targ(TARGCONST, 0);
-			i->r = r = newtemp();
+			i->r = r = newtemp(regtype);
 			addir(b1, i);
 			b1->branch = b2;
 			i = newφ(n, 2);
-			i->φ.r = l = newtemp();
+			i->φ.r = l = newtemp(regtype);
 			i->φ.a[0] = t;
 			i->φ.a[1] = r;
 			addφ(b2, i);
@@ -280,17 +301,17 @@ irexpr(ASTNode *n, IRBlock *b, IRBlock **br)
 		i = irop(n, n->op);
 		i->a = irexpr(n->n1, b, &b);
 		i->a = irread(n, i->a, b, 1);
-		i->r = newtemp();
+		i->r = newtemp(n->type);
 		addir(b, i);
 		*br = b;
 		return i->r;
 	case ASTDEREF:
 		t = irexpr(n->n, b, &b);
-		t = targ(TARGIND, irread(n, t, b, 0));
+		t = targ(TARGIND, irread(n, t, b, 0), n->type);
 		*br = b;
 		return t;
 	case ASTMEMB:
-		return targ(TARGIND, addrof(n, b, br));
+		return targ(TARGIND, addrof(n, b, br), n->type);
 	case ASTASS:
 		if(n->op == OPMOV){
 			i = irop(n, OPMOV);
@@ -304,7 +325,7 @@ irexpr(ASTNode *n, IRBlock *b, IRBlock **br)
 			i->b = irexpr(n->n2, b, &b);
 			l = irexpr(n->n1, b, &b);
 			i->a = irread(n, l, b, 1);
-			i->r = t = newtemp();
+			i->r = t = newtemp(n->type);
 			addir(b, i);
 			if(n->op <= OPMOD && n->type->t < TUINT)
 				t = ircast(n, b, t, n->type->t);
@@ -318,7 +339,7 @@ irexpr(ASTNode *n, IRBlock *b, IRBlock **br)
 	case ASTINC:
 		k = n->type->t == TIND ? n->type->link->size : 1;
 		i = irop(n, n->op <= POSTINC ? OPADD : OPSUB);
-		i->r = t = newtemp();
+		i->r = t = newtemp(n->type);
 		l = irexpr(n->n1, b, &b);
 		i->a = r = irread(n, l, b, 1);
 		i->b = targ(TARGCONST, k);
@@ -328,7 +349,7 @@ irexpr(ASTNode *n, IRBlock *b, IRBlock **br)
 		if((n->op & 1) != 0){
 			i = irop(n, OPMOV);
 			i->a = r;
-			i->r = r = newtemp();
+			i->r = r = newtemp(n->type);
 			addir(b, i);
 		}else
 			r = t;
@@ -341,18 +362,18 @@ irexpr(ASTNode *n, IRBlock *b, IRBlock **br)
 		b0 = newblock();
 		b1 = newblock();
 		b2 = newblock();
-		l = newtemp();
+		l = newtemp(n->type);
 		condbranch(n->cond, b, b0, b1);
 		t = irexpr(n->block, b0, &b0);
 		i = irop(n, OPMOV);
 		i->a = t;
-		i->r = t = newtemp();
+		i->r = t = newtemp(n->type);
 		addir(b0, i);
 		b0->branch = b2;
 		r = irexpr(n->elsebl, b1, &b1);
 		i = irop(n, OPMOV);
 		i->a = r;
-		i->r = r = newtemp();
+		i->r = r = newtemp(n->type);
 		addir(b1, i);
 		b1->branch = b2;
 		i = newφ(n, 2);
@@ -365,6 +386,33 @@ irexpr(ASTNode *n, IRBlock *b, IRBlock **br)
 	case ASTCOMMA:
 		irexpr(n->n1, b, &b);
 		return irexpr(n->n2, b, br);
+	case ASTCALL:
+		a = emalloc(sizeof(Targ*) * n->func.argn);
+		for(k = 0; k < n->func.argn; k++)
+			a[k] = irexpr(n->func.args[k], b, &b);
+		o = 0;
+		for(k = 0; k < n->func.argn; k++){
+			i = irop(n, OPMOV);
+			i->a = a[k];
+			ty = n->func.args[k]->type;
+			if(k > 0 || ty->t == TFLOAT || ty->t == TDOUBLE)
+				i->r = targ(TARGIND, targ(TARGARG, o), ty);
+			else
+				i->r = targ(TARGRETV, regtype);
+			addir(b, i);
+			o += ty->size;
+			o = o + 3 & -4;
+		}
+		free(a);
+		i = irop(n, OPCALL);
+		i->a = irread(n, addrof(n->func.n, b, &b), b, 0);
+		addir(b, i);
+		i = irop(n, OPMOV);
+		i->r = newtemp(n->type);
+		i->a = targ(TARGRETV, n->type);
+		addir(b, i);
+		*br = b;
+		return i->r;
 	default:
 		sysfatal("irexpr: unhandled %A", n->t);
 		return nil;
@@ -531,7 +579,7 @@ irstat(ASTNode *n, IRBlock *b, IRBlock *brk, IRBlock *cont)
 		if(n->n != nil){
 			i = irop(n, OPMOV);
 			i->a = irexpr(n->n, b, &b);
-			i->r = targ(TARGRETV);
+			i->r = targ(TARGRETV, n->n->type);
 			addir(b, i);
 		}
 		b->branch = nil;
@@ -653,18 +701,20 @@ irgen(ASTNode *n)
 {
 	IRBlock *b;
 	Symbol *s;
-	int i;
+	int i, o;
 	IR *ir;
 
 	b = newblock();
+	o = 0;
 	for(i = 0; i < curfunc->type->nmemb; i++)
 		if((s = curfunc->arg[i]) != 0){
 			ir = irop(n, OPMOV);
 			ir->r = s->targ = targ(TARGSYM, s);
-			if(i == 0)
-				ir->a = targ(TARGRETV);
+			if(i > 0 || s->t == &types[TFLOAT] || s->t == &types[TDOUBLE])
+				ir->a = targ(TARGIND, targ(TARGFP, o), s->t);
 			else
-				ir->a = targ(TARGIND, targ(TARGFP, s->off));
+				ir->a = targ(TARGRETV, regtype);
+			o = o + s->t->size + 3 & -4;
 			addir(b, ir);
 		}
 	irstat(n, b, nil, nil);
@@ -673,5 +723,7 @@ irgen(ASTNode *n)
 	irtossa();
 	dvn();
 	dead();
+	codegen();
+	regalloc();
 	irprint();
 }

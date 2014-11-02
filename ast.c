@@ -47,6 +47,7 @@ static char *astname[] = {
 	"ASTLABEL",
 	"ASTGOTO",
 	"ASTMEMB",
+	"ASTCALL",
 };
 static char *copname[] = {
 	[OPMOV] "MOV",
@@ -85,8 +86,17 @@ static char *iropname[] = {
 	[OPTST] "TST",
 	[OPLD] "LD",
 	[OPST] "ST",
+	[OPLDB] "LDB",
+	[OPLDSB] "LDSB",
+	[OPSTB] "STB",
+	[OPLDH] "LDH",
+	[OPLDSH] "LDSH",
+	[OPSTH] "STH",
+	[OPLDD] "LDD",
+	[OPSTD] "STD",
 	[OPADD] "ADD",
 	[OPSUB] "SUB",
+	[OPRSB] "RSB",
 	[OPMUL] "MUL",
 	[OPDIV] "DIV",
 	[OPMOD] "MOD",
@@ -115,6 +125,12 @@ static char *iropname[] = {
 	[OPZXTH] "ZXTH",
 	[OPZXTW] "ZXTW",
 	[OPPHI] "φ",
+	[OPCALL] "CALL",
+	[OPFADD] "FADD",
+	[OPFSUB] "FSUB",
+	[OPFMUL] "FMUL",
+	[OPFDIV] "FDIV",
+	[OPFCMP] "FCMP",
 };
 static char *typename[] = {
 	"XXX",
@@ -302,30 +318,55 @@ int
 irtargfmt(Fmt *f)
 {
 	Targ *t;
+	int rc;
 	
 	t = va_arg(f->args, Targ *);
 	if(t == nil)
 		return fmtstrcpy(f, "nil");
 	switch(t->t){
 	case TARGSYM:
-		return fmtstrcpy(f, t->sym->name);
+		rc = fmtstrcpy(f, t->sym->name);
+		break;
 	case TARGSSA:
-		return fmtprint(f, "%s:%d", t->sym->name, t->n);
+		rc = fmtprint(f, "%s:%d", t->sym->name, t->n);
+		break;
 	case TARGTEMP:
-		return fmtprint(f, "t%d", t->tn);
+		rc = fmtprint(f, "t%d", t->tn);
+		if(t->type != nil)
+			switch(t->type->t){
+			case TFLOAT: rc += fmtrune(f, 'f'); break;
+			case TDOUBLE: rc += fmtrune(f, 'd'); break;
+			}
+		break;
 	case TARGCONST:
-		return fmtprint(f, "$%#ux", t->lval);
+		rc = fmtprint(f, "$%#ux", t->lval);
+		break;
 	case TARGRETV:
-		return fmtprint(f, "R0");
+		rc = fmtprint(f, t->type == &types[TFLOAT] || t->type == &types[TDOUBLE] ? "F0" : "R0");
+		break;
 	case TARGFP:
-		return fmtprint(f, "FP(%d)", t->off);
+		rc = fmtprint(f, "FP(%d)", t->off);
+		break;
+	case TARGARG:
+		rc =fmtprint(f, "ARG(%d)", t->off);
+		break;
 	case TARGIND:
-		return fmtprint(f, "(%J)", t->link);
+		rc = fmtprint(f, "(%J)", t->link);
+		break;
 	case TARGADDR:
-		return fmtprint(f, "&%s%+d", t->sym->name, t->n);
+		rc = fmtprint(f, "&%s%+d", t->sym->name, t->n);
+		break;
+	case TARGSH:
+		rc = fmtprint(f, "%s(%J, %J)", iropname[t->op], t->a, t->b);
+		break;
 	default:
 		return fmtprint(f, "???(%d)", t->t);
 	}
+	if(t->Rn >= 32)
+		rc += fmtprint(f, "<F%d>", t->Rn - 32);
+	else if(t->Rn >= 0)
+		rc += fmtprint(f, "<R%d>", t->Rn);
+	return rc;
 }
 
 int
@@ -377,7 +418,8 @@ ASTNode*
 node(int type, ...)
 {
 	va_list va;
-	ASTNode *n;
+	ASTNode *n, *l, *m;
+	int i;
 
 	n = emalloc(sizeof(*n));
 	n->t = type;
@@ -447,6 +489,20 @@ node(int type, ...)
 	case ASTBREAK:
 	case ASTCONTINUE:
 		break;
+	case ASTCALL:
+		n->func.n = va_arg(va, ASTNode *);
+		l = va_arg(va, ASTNode *);
+		for(i = 0, m = l; m != nil; i++)
+			m = m->next;
+		n->func.argn = i;
+		n->func.args = emalloc(sizeof(ASTNode *) * i);
+		for(i = 0, m = l; m != nil; i++){
+			l = m->next;
+			m->next = nil;
+			n->func.args[i] = m;
+			m = l;
+		}
+		break;
 	default:
 		sysfatal("node: unknown type %A", type);
 	}
@@ -485,6 +541,8 @@ type(int t, ...)
 		memb = va_arg(va, Member *);
 		nmemb = va_arg(va, int);
 		va_end(va);
+		if(nmemb == 1 && memb->type->t == TVOID)
+			nmemb = 0;
 		for(p = &typelist; (s = *p) != nil; p = &s->next){
 			if(s->t != TFUNC || s->link != l || s->nmemb != nmemb)
 				continue;
@@ -692,10 +750,6 @@ doparam(ASTNode *n, Type *t, Member *m, int nm)
 	if(n != nil)
 		m->name = strdup(n->sym->name);
 	m->type = t;
-	if(nm > 0)
-		m->off = m[-1].off + (m[-1].type->size + 3 & -4);
-	else
-		m->off = 0;
 	return r;
 }
 
@@ -737,8 +791,10 @@ numcast(ASTNode **n, int t)
 		error(*n, "floating point cast not implemented");
 		return;
 	}
-	if(types[t0].size <= types[t].size)
+	if(types[t0].size <= types[t].size){
+		(*n)->type = &types[t];
 		return;
+	}
 	if(types[t].sign)
 		*n = node(ASTUN, OPSXTB + ((t - 1) >> 1), *n);
 	else
@@ -804,18 +860,18 @@ binaryconv(ASTNode *n)
 	t2 = n->n2->type->t;
 	if(t1 == TIND && t2 < TFLOAT && (n->op == OPADD || n->op == OPSUB)){
 		numcast(&n->n2, TUINT);
-		if(n->n2->type->size == 0)
+		if(n->n1->type->link->size == 0)
 			error(n, "pointer arithmetic on undefined type");
-		n->n2 = node(ASTBIN, OPMUL, n->n2, node(ASTCLONG, n->n1->type->size));
-		n->type = n->n1->type;
+		n->n2 = node(ASTBIN, OPMUL, n->n2, node(ASTCLONG, n->n1->type->link->size));
+		n->type = n->n2->type = n->n1->type;
 		return;
 	}
 	if(t2 == TIND && t1 < TFLOAT && (n->op == OPADD || n->op == OPSUB)){
 		numcast(&n->n1, TUINT);
-		if(n->n1->type->size == 0)
+		if(n->n2->type->link->size == 0)
 			error(n, "pointer arithmetic on undefined type");
-		n->n1 = node(ASTBIN, OPMUL, n->n1, node(ASTCLONG, n->n2->type->size));
-		n->type = n->n2->type;
+		n->n1 = node(ASTBIN, OPMUL, n->n1, node(ASTCLONG, n->n2->type->link->size));
+		n->type = n->n1->type = n->n2->type;
 		return;
 	}
 	if(t1 == TIND && OPTYPE(n->op) == OPBRANCH){
@@ -826,12 +882,12 @@ binaryconv(ASTNode *n)
 		implcast(&n->n1, n->n2->type);
 		return;
 	}
-	if(t1 == TXXX || t1 > TBASIC || n->op > OPFLOAT && t1 >= TFLOAT){
+	if(t1 == TXXX || t1 > TBASIC){
 		error(n, "invalid type %T in operation %O", n->n1->type, n->op);
 		n->type = &types[TINT];
 		return;
 	}
-	if(t2 == TXXX || t2 > TBASIC || n->op > OPFLOAT && t2 >= TFLOAT){
+	if(t2 == TXXX || t2 > TBASIC){
 		error(n, "invalid type %T in operation %O", n->n2->type, n->op);
 		n->type = &types[TINT];
 		return;
@@ -841,6 +897,8 @@ binaryconv(ASTNode *n)
 			numcast(&n->n1, *tp);
 			numcast(&n->n2, *tp);
 			n->type = &types[*tp];
+			if((n->type == &types[TFLOAT] || n->type == &types[TDOUBLE]) && (n->op < OPADD || n->op > OPDIV) && OPTYPE(n->op) == OPBRANCH)
+				error(n, "not a valid floating point operation");
 			return;
 		}
 	numcast(&n->n1, TINT);
@@ -854,7 +912,7 @@ unaryconv(ASTNode *n)
 	int t1;
 	
 	t1 = n->n1->type->t;
-	if(t1 == TXXX || t1 > TBASIC || n->op > OPFLOAT && t1 >= TFLOAT){
+	if(t1 == TXXX || t1 > TBASIC || n->op != OPNEG && n->op != OPMOV && t1 >= TFLOAT){
 		error(n, "invalid type %T in operation %O", n->n1->type, n->op);
 		n->type = &types[TINT];
 		return;
@@ -899,6 +957,43 @@ membfind(Line *l, Type *t, char *n)
 			return m;
 	error(l, "'%s' not a member", n);
 	return nil;
+}
+
+void
+funccheck(ASTNode *n)
+{
+	ASTNode **p;
+	Type *t;
+	int i;
+
+	if(n->func.n->t == ASTSYM){
+		n->func.n->type = n->func.n->sym->t;
+		if(n->func.n->type == nil)
+			n->func.n->type = type(TFUNC, &types[TINT], nil, -1);
+	}else
+		n->func.n = typecheck(n->func.n);
+	if(n->func.n->type->t == TIND){
+		n->func.n = node(ASTDEREF, n->func.n);
+		typecheck(n->func.n);
+	}
+	if(n->func.n->type->t != TFUNC){
+		error(n, "type %T is not a function", n->func.n->type);
+		n->type = &types[TINT];
+		return;
+	}
+	t = n->func.n->type;
+	n->type = t->link;
+	for(p = n->func.args, i = 0; p < n->func.args + n->func.argn; p++, i++){
+		*p = typecheck(*p);
+		if(i == t->nmemb)
+			error(n, "too many arguments");
+		else if(i < t->nmemb)
+			implcast(p, t->memb[i].type);
+	}
+	if(i < t->nmemb)
+		error(n, "too few arguments");
+	if(t->nmemb == -1)
+		warn(n, "function args not checked");
 }
 
 ASTNode *
@@ -946,11 +1041,12 @@ typecheck(ASTNode *n)
 		return n;
 	case ASTUN:
 		n->n1 = typecheck(n->n1);
-		unaryconv(n);
 		if(n->op == OPUPLUS)
 			n->op = OPMOV;
+		unaryconv(n);
 		return n;
 	case ASTSYM:
+		checksym(n->sym);
 		if(n->sym->t->t == TARRAY){
 			n1 = node(ASTADDROF, n);
 			n1->type = type(TIND, n->sym->t->link);
@@ -1041,6 +1137,9 @@ typecheck(ASTNode *n)
 	case ASTCAST:
 		n->cast.n = typecheck(n->cast.n);
 		return explcast(n->cast.n, n->cast.t);
+	case ASTCALL:
+		funccheck(n);
+		return n;
 	default:
 		sysfatal("typecheck: unhandled type %A", n->t);
 		return nil;
@@ -1053,6 +1152,7 @@ longop(Line *l, int op, long a, long b, long *r)
 	switch(op){
 	case OPADD: *r = a + b; return 1;
 	case OPSUB: *r = a - b; return 1;
+	case OPRSB: *r = b - a; return 1;
 	case OPMUL: *r = a * b; return 1;
 	case OPDIV:
 		if(b == 0){
@@ -1116,7 +1216,9 @@ longop(Line *l, int op, long a, long b, long *r)
 	case OPSXTH: *r = (signed short) a; return 1;
 	case OPZXTB: *r = (unsigned char) a; return 1;
 	case OPZXTH: *r = (unsigned short) a; return 1;
-	case OPLD: case OPST: return 0;
+	case OPLD: case OPLDB: case OPLDSB: case OPLDH: case OPLDSH: case OPLDD:
+	case OPST: case OPSTB: case OPSTH: case OPSTD:
+		return 0;
 	default:
 		error(l, "longop: unimplemented %O", op);
 		return 0;
@@ -1127,6 +1229,7 @@ ASTNode *
 astfold(ASTNode *n)
 {
 	ASTNode *m, *m0, *m1, **p;
+	int i;
 	long r;
 	
 	if(n == nil)
@@ -1142,8 +1245,11 @@ astfold(ASTNode *n)
 	case ASTBIN:
 		n->n1 = astfold(n->n1);
 		n->n2 = astfold(n->n2);
-		if(n->n1->t == ASTCLONG && n->n2->t == ASTCLONG && longop(n, n->op, n->n1->lval, n->n2->lval, &r))
-			return node(ASTCLONG, r);
+		if(n->n1->t == ASTCLONG && n->n2->t == ASTCLONG && longop(n, n->op, n->n1->lval, n->n2->lval, &r)){
+			m = node(ASTCLONG, r);
+			m->type = n->type;
+			return m;
+		}
 		return n;
 	case ASTUN:
 		n->n1 = astfold(n->n1);
@@ -1203,6 +1309,11 @@ astfold(ASTNode *n)
 				m = m1;
 			}
 		}
+		return n;
+	case ASTCALL:
+		n->func.n = astfold(n->func.n);
+		for(i = 0; i < n->func.argn; i++)
+			n->func.args[i] = astfold(n->func.args[i]);
 		return n;
 	default:
 		print("astfold: unhandled type %A\n", n->t);

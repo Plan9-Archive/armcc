@@ -9,6 +9,40 @@ Symbol **syms;
 BitSet **sblocks;
 int nsyms;
 
+static void
+ircritedge(void)
+{
+	IRBlock *b, *c, *d, *l;
+	int i, j;
+	
+	l = &curfunc->bllist;
+	for(b = l->next; b != l; b = b->next)
+		for(i = 0; i < b->nto; i++){
+			if(b->nto == 1 || (d = b->to[i])->nfrom == 1)
+				continue;
+			c = emalloc(sizeof(IRBlock));
+			c->instr.next = c->instr.prev = &c->instr;
+			c->branch = c->to[0] = d;
+			c->nto = c->nfrom = 1;
+			c->from = emalloc(sizeof(IRBlock *));
+			c->from[0] = b;
+			b->to[i] = c;
+			if(b->branch == d)
+				b->branch = c;
+			else if(OPTYPE(b->instr.prev->op) == OPBRANCH && b->instr.prev->targ == d)
+				b->instr.prev->targ = c;
+			else
+				sysfatal("ircritedge: unimplemented type of branch");
+			for(j = 0; j < d->nfrom; j++)
+				if(d->from[j] == b)
+					d->from[j] = c;
+			c->prev = b;
+			c->next = b->next;
+			c->prev->next = c;
+			c->next->prev = c;
+		}
+}
+
 void
 addφ(IRBlock *b, IR *i)
 {
@@ -172,11 +206,23 @@ irindmov(void)
 		for(i = b->instr.next; i != &b->instr; i = i->next)
 			if(i->op == OPMOV){
 				if(i->a != nil && i->a->t == TARGIND){
-					i->op = OPLD;
+					switch(i->a->type->t){
+					case TUCHAR: i->op = OPLDB; break;
+					case TCHAR: i->op = OPLDSB; break;
+					case TUSHORT: i->op = OPLDH; break;
+					case TSHORT: i->op = OPLDSH; break;
+					case TDOUBLE: case TVLONG: case TUVLONG: i->op = OPLDD; break;
+					default: i->op = OPLD;
+					}
 					i->a = i->a->link;
 				}
 				if(i->r != nil && i->r->t == TARGIND){
-					i->op = OPST;
+					switch(i->r->type->t){
+					case TUCHAR: case TCHAR: i->op = OPSTB; break;
+					case TUSHORT: case TSHORT: i->op = OPSTH; break;
+					case TDOUBLE: case TVLONG: case TUVLONG: i->op = OPSTD; break;
+					default: i->op = OPST;
+					}
 					i->b = i->a;
 					i->a = i->r->link;
 					i->r = nil;
@@ -306,10 +352,10 @@ irφinsert(void)
 				}
 			}
 	}
-	free(hasφ);
-	free(visit);
-	free(varkill);
-	free(globals);
+	bsfree(hasφ);
+	bsfree(visit);
+	bsfree(varkill);
+	bsfree(globals);
 }
 
 int *φctr;
@@ -390,10 +436,64 @@ static void
 irφrename(void)
 {
 	φctr = emalloc(nsyms * sizeof(int));
-	φstack = emalloc(nsyms * sizeof(Targ));
+	φstack = emalloc(nsyms * sizeof(Targ*));
 	irφrenblk(blocks[0]);
 	free(φctr);
 	free(φstack);
+}
+
+static void
+looptrav(Loop *l, IRBlock *b)
+{
+	int i;
+	IRBlock *c;
+
+	for(i = 0; i < b->nfrom; i++)
+		if((c = b->from[i]) != nil && !bstest(l->bl, c->num)){
+			bsadd(l->bl, c->num);
+			looptrav(l, c);
+		}
+}
+
+static void
+irloops(void)
+{
+	IRBlock *b, *c, *k, *l;
+	int j;
+	Loop *lp, **p;
+	int al;
+	
+	l = &curfunc->bllist;
+	p = &curfunc->loops;
+	for(b = l->next; b != l; b = b->next)
+		for(j = 0; j < b->nto; j++){
+			c = b->to[j];
+			if(c == nil || b->num < c->num)
+				continue;
+			for(k = b; k != l->next && k != c; k = k->idom)
+				;
+			if(k != c){
+				error(b->instr.next, "irreducible control flow");
+				continue;
+			}
+
+			for(lp = curfunc->loops; lp != nil; lp = lp->next)
+				if(lp->head == c)
+					break;
+			if(al = lp == nil){
+				lp = emalloc(sizeof(Loop));
+				lp->bl = bsnew(nblocks);
+			}
+			lp->head = c;
+			bsadd(lp->bl, b->num);
+			bsadd(lp->bl, c->num);
+			if(b != c)
+				looptrav(lp, b);
+			if(al){
+				*p = lp;
+				p = &lp->next;
+			}
+		}
 }
 
 void
@@ -401,6 +501,7 @@ irtossa(void)
 {
 	int i;
 
+	ircritedge();
 	irdfs();
 	irdom();
 	irfront();
@@ -408,8 +509,10 @@ irtossa(void)
 	numvars();
 	irφinsert();
 	irφrename();
+	irloops();
 	
 	for(i = 0; i < nsyms; i++)
-		free(sblocks[i]);
+		bsfree(sblocks[i]);
+	free(sblocks);
 	free(syms);
 }
